@@ -7,10 +7,10 @@ import math
 import os
 
 # keras
-from keras import regularizers
+from keras import backend, regularizers
 from keras.callbacks import EarlyStopping, LearningRateScheduler
 from keras.datasets import mnist
-from keras.layers import BatchNormalization, Dense, dot, Dropout, Flatten, Input, LeakyReLU, ReLU, Reshape
+from keras.layers import BatchNormalization, Dense, dot, Dropout, Flatten, Input, LeakyReLU, Multiply, ReLU, Reshape
 from keras.layers.recurrent import LSTM
 from keras.layers.wrappers import Bidirectional
 from keras.models import Model
@@ -32,11 +32,11 @@ FILE_PATH = "data/index_data.csv"
 STATS_PATHS = {
     "LIQ": "data/volume_data.csv",
 }
-NUM_FACTOR = 3
-NUM_BETA_LAG = 1
-NUM_EPOCH = 100
+NUM_FACTOR = 5
+NUM_BETA_LAG = 10
+NUM_EPOCH = 2000
 NUM_BATCH = 100
-LR = 0.01
+LR = 0.1
 TRAIN_START = '2011/1/1'
 TRAIN_END = '2018/12/31'
 TEST_START = '2019/1/1'
@@ -161,59 +161,63 @@ for i in range(asset_index.index.shape[0]-1):
 asset_index = asset_index.drop(asset_index.index[dup_list])
 asset_return = asset_index.pct_change().dropna()
 
-if IS_STATS:
-    # 経済データを使用する場合
-    # モメンタム
-    asset_chars = asset_index.diff(5)
-    asset_chars = pd.concat(
-        [asset_chars, asset_index.diff(20)], axis=1).dropna()
-    # ボラティリティ
-    asset_chars = pd.concat(
-        [asset_chars, asset_return.rolling(5).std(ddof=0)], axis=1).dropna()
-    asset_chars = pd.concat(
-        [asset_chars, asset_return.rolling(20).std(ddof=0)], axis=1).dropna()
-    # 流動性
-    volume = pd.read_csv(STATS_PATHS["LIQ"], encoding="shift_jis", index_col=0)
-    volume = volume.dropna(how="all").dropna(axis=1).dropna()
-    volume_sd = volume.rolling(20).std(ddof=0)
-    asset_chars = pd.concat([asset_chars, volume], axis=1).dropna()
-    asset_chars = pd.concat([asset_chars, volume_sd], axis=1).dropna()
-    # 差分追加版
-    # asset_chars = pd.concat([asset_chars, asset_chars.diff(5)],
-    #                         axis=1).shift(1).dropna()
-    # asset charsは一日ラグを設ける
-    asset_chars = asset_chars.shift(1).dropna()
+# ---------------------------------------------------------
+#  特徴データ
+# ---------------------------------------------------------
+# モメンタム
+asset_chars = asset_index.diff(5)
+asset_chars = pd.concat(
+    [asset_chars, asset_index.diff(20)], axis=1).dropna()
+asset_chars = pd.concat([asset_chars, asset_chars.diff(1)],
+                        axis=1).shift(1).dropna()
+# ボラティリティ
+asset_chars = pd.concat(
+    [asset_chars, asset_return.rolling(5).std(ddof=0)], axis=1).dropna()
+asset_chars = pd.concat(
+    [asset_chars, asset_return.rolling(20).std(ddof=0)], axis=1).dropna()
+# 流動性
+volume = pd.read_csv(STATS_PATHS["LIQ"], encoding="shift_jis", index_col=0)
+volume = volume.dropna(how="all").dropna(axis=1).dropna()
+volume_sd = volume.rolling(20).std(ddof=0)
+asset_chars = pd.concat([asset_chars, volume], axis=1).dropna()
+asset_chars = pd.concat([asset_chars, volume_sd], axis=1).dropna()
 
-    if not IS_RECURRENT:
-        # 過去NUM_BETA_LAG日前～前日のデータを使用
-        base_chars = asset_chars
-        for i in range(NUM_BETA_LAG-1):
-            base_chars = pd.concat(
-                [base_chars, asset_chars.shift(i+1)], axis=1)
-        asset_chars = base_chars
-        asset_chars = asset_chars.dropna()
-else:
-    # 経済データは使用せず、過去NUM_BETA_LAG日前～前日のデータを使用
-    asset_chars = []
-    for i in range(asset_return.shape[0] - NUM_BETA_LAG):
-        asset_char = []
-        for j in range(NUM_BETA_LAG):
-            asset_char.append(np.array(asset_return.iloc[i+j, :]))
-        asset_chars.append(asset_char)
-    asset_chars = np.array(asset_chars)
+# asset charsは一日ラグを設ける
+asset_chars = asset_chars.shift(1).dropna()
 
+
+# ---------------------------------------------------------
+#  ラグ付きリターンデータ
+# ---------------------------------------------------------
+# 過去NUM_BETA_LAG日前～前日のデータを使用
+lag_return = asset_return.shift(1)
+for i in range(NUM_BETA_LAG-1):
+    lag_return = pd.concat(
+        [lag_return, asset_return.shift(i+1)], axis=1)
+lag_return = lag_return.dropna()
+
+
+# ---------------------------------------------------------
+#  使用するデータセットを確定
+# ---------------------------------------------------------
 # インデックスの型を変更し、ラグ部分のデータを削除
 asset_return.index = np.array([datetime.strptime(x, '%Y/%m/%d')
                                for x in asset_return.index])
+asset_chars.index = np.array([datetime.strptime(x, '%Y/%m/%d')
+                              for x in asset_chars.index])
+lag_return.index = np.array([datetime.strptime(x, '%Y/%m/%d')
+                             for x in lag_return.index])
+common_index = np.intersect1d(np.intersect1d(asset_return.index, asset_chars.index), lag_return.index)
 
-# 特徴データを使用する場合に使用
-if IS_STATS:
-    asset_chars.index = np.array([datetime.strptime(x, '%Y/%m/%d')
-                                  for x in asset_chars.index])
-    common_index = np.intersect1d(asset_return.index, asset_chars.index)
-    # 共通部分のみ使用する
-    asset_return = asset_return.loc[common_index]
-    asset_chars = asset_chars.loc[common_index]
+asset_chars = lag_return
+# asset_chars = pd.concat([lag_return, asset_chars], axis=1)
+# lag_return = asset_chars
+
+# 共通部分のみ使用する
+asset_return = asset_return.loc[common_index]
+asset_chars = asset_chars.loc[common_index]
+lag_return = lag_return.loc[common_index]
+
 
 # サンプル分割を実施
 is_train = (asset_return.index >= TRAIN_START) * \
@@ -223,11 +227,17 @@ x_train_org = asset_return[is_train]
 x_test_org = asset_return[is_test]
 x_train_chars = asset_chars[is_train]
 x_test_chars = asset_chars[is_test]
+x_train_lag = lag_return[is_train]
+x_test_lag = lag_return[is_test]
+
+# 特徴データを使用しない場合
+x_train_chars, x_test_chars = x_train_lag, x_test_lag
 
 # 学習データの中で明らかに変な値があるので、丸め処理を実施
 # TRデータの場合には実施しない
 # x_train_org = round_data(x_train_org, quantile_point=0.005)
-# x_train_chars = round_data(x_train_chars, quantile_point=0.005)  # 何故かこっちだけ機能しない
+# x_train_chars = round_data(x_train_chars, quantile_point=0.05)
+# x_train_lag = round_data(x_train_lag, quantile_point=0.005)
 print(np.max(x_train_org.max()))
 
 # 標準化：今は資産の特徴データにのみ適用
@@ -241,6 +251,10 @@ x_chars_scaler = StandardScaler()
 x_chars_scaler.fit(x_train_chars)
 x_train_chars = x_chars_scaler.transform(x_train_chars)
 x_test_chars = x_chars_scaler.transform(x_test_chars)
+x_lag_scaler = StandardScaler()
+x_lag_scaler.fit(x_train_lag)
+x_train_lag = x_lag_scaler.transform(x_train_lag)
+x_test_lag = x_lag_scaler.transform(x_test_lag)
 
 
 # ---------------------------------------------------------
@@ -258,16 +272,13 @@ if IS_RECURRENT:
     x = Bidirectional(LSTM(64, batch_input_shape=(
         None, x_train_chars.shape[1], x_train_chars.shape[2]), recurrent_dropout=0.25))(input_beta)
     x = BatchNormalization()(x)
-    x = LeakyReLU(alpha=0.2)(x)
-    # x = ReLU()(x)
+    x = LeakyReLU(alpha=0.3)(x)
     x = Dropout(0.20)(x)
 else:
     input_beta = Input(shape=(x_train_chars.shape[1],))
-    # x = Flatten()(input_beta)
-    x = Dense(256, kernel_regularizer=regularizers.l1(1e-3))(input_beta)
+    x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(input_beta)
     x = BatchNormalization()(x)
     x = LeakyReLU(alpha=0.3)(x)
-    # x = ReLU()(x)
     x = Dropout(0.20)(x)
 x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(x)
 x = BatchNormalization()(x)
@@ -281,18 +292,37 @@ x = Dense(NUM_FACTOR * input_shape, activation='linear')(x)
 output_beta = Reshape((input_shape, NUM_FACTOR))(x)
 model_beta = Model(inputs=input_beta, outputs=output_beta)  # beta確認用
 
+# ウェイトとファクターを生成する層
+# ウェイトを生成する層
+input_weight = Input(shape=(x_train_lag.shape[1],))
+x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(input_weight)
+x = BatchNormalization()(x)
+x = LeakyReLU(alpha=0.3)(x)
+x = Dropout(0.20)(x)
+x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(x)
+x = BatchNormalization()(x)
+x = LeakyReLU(alpha=0.3)(x)
+x = Dropout(0.50)(x)
+x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(x)
+x = BatchNormalization()(x)
+x = LeakyReLU(alpha=0.3)(x)
+x = Dropout(0.50)(x)
+x = Dense(NUM_FACTOR * input_shape, activation='linear',
+          kernel_regularizer=regularizers.l1(1e-3))(x)
+output_weight = Reshape((NUM_FACTOR, input_shape))(x)
 # ファクターを生成する層
 input_factor = Input(shape=(input_shape,))
-output_factor = Dense(NUM_FACTOR, activation='linear',
-                      kernel_regularizer=regularizers.l1(1e-3))(input_factor)
-model_factor = Model(inputs=input_factor, outputs=output_factor)  # factor確認用
-output = dot([output_beta, output_factor], axes=(2, 1))
+output_factor = dot([output_weight, input_factor], axes=(2, 1))
+model_factor = Model(inputs=[input_beta, input_weight, input_factor],
+                     outputs=[output_weight, output_factor])  # factor確認用
 
 # 上記を結合してオートエンコーダを定義
 # adam = Adam(lr=0.001)
 nadam = Nadam()
-autoencoder = Model(inputs=[input_beta, input_factor], output=output)
-autoencoder.compile(optimizer="adam", loss='mean_squared_error')
+output = dot([output_beta, output_factor], axes=(2, 1))
+autoencoder = Model(
+    inputs=[input_beta, input_weight, input_factor], output=output)
+autoencoder.compile(optimizer=nadam, loss='mean_squared_error')
 autoencoder.summary()
 plot_model(autoencoder, to_file="image/model_image.png",
            show_shapes=True, show_layer_names=False)  # モデルの構造を出力
@@ -302,9 +332,11 @@ def step_decay(epoch):
     # 学習率をエポックごとに調整
     # see: https://keras.io/ja/optimizers/
     x = LR
-    if epoch >= NUM_EPOCH * 0.25:
+    if epoch >= NUM_EPOCH * 0.10:
         x *= 0.1
     if epoch >= NUM_EPOCH * 0.50:
+        x *= 0.1
+    if epoch >= NUM_EPOCH * 0.75:
         x *= 0.1
     return x
 
@@ -315,7 +347,7 @@ def step_decay(epoch):
 #     min_delta=0.0,
 #     patience=10)
 lr_decay = LearningRateScheduler(step_decay)
-result = autoencoder.fit(x=[x_train_chars, x_train],
+result = autoencoder.fit(x=[x_train_chars, x_train_lag, x_train],
                          y=x_train,
                          validation_split=0.1,
                          epochs=NUM_EPOCH,
@@ -337,11 +369,12 @@ norm_weight.to_csv("stats/factor_weight.csv", encoding="shift_jis")
 # インサンプルの系列比較
 # ---------------------------------------------------------
 # デコードされたリターン系列を作成
-decoded_return = autoencoder.predict([x_train_chars, x_train])
+decoded_return = autoencoder.predict([x_train_chars, x_train_lag, x_train])
 decoded_return = x_scaler.inverse_transform(decoded_return)
 r_2s = np.array(calcu_r_squared(x_train_org, decoded_return, is_sep=True))
 
-for num_index in range(NUM_PLOT):
+# for num_index in range(NUM_PLOT):
+for num_index in range(decoded_return.shape[1]):
     # 累積リターンに変更
     cum_ret = 100 * (1 + x_train_org.iloc[:, num_index]).cumprod()
     cum_ret_decoded = 100 * (1 + decoded_return[:, num_index]).cumprod()
@@ -365,7 +398,7 @@ print(calcu_r_squared(x_train_org, decoded_return))
 # print("pred R2:{}".format(calcu_pred_r_squared(x_train, factors, betas)))
 
 # ファクター系列を確認
-factors = model_factor.predict(x_train)
+weight, factors = model_factor.predict([x_train_chars, x_train_lag, x_train])
 plot_factors(x_train, factors, "image/factor_insample.png")
 
 # ベータ系列を確認・解釈
@@ -389,9 +422,9 @@ for i_firm in range(NUM_PLOT):
 # アウトオブサンプルの系列比較
 # ---------------------------------------------------------
 # デコードされたリターン系列を作成
-decoded_return = autoencoder.predict([x_test_chars, x_test])
+decoded_return = autoencoder.predict([x_test_chars, x_test_lag, x_test])
 decoded_return = x_scaler.inverse_transform(decoded_return)
-r_2s = np.array(calcu_r_squared(x_test, decoded_return, is_sep=True))
+r_2s = np.array(calcu_r_squared(x_test_org, decoded_return, is_sep=True))
 
 for num_index in range(NUM_PLOT):
     # 累積リターンに変更
@@ -411,7 +444,7 @@ for num_index in range(NUM_PLOT):
 print(calcu_r_squared(x_test_org, decoded_return))
 
 # ファクター系列を確認
-factors = model_factor.predict(x_test)
+weight, factors = model_factor.predict([x_test_chars, x_test_lag, x_test])
 plot_factors(x_test, factors, "image/factor_outsample.png")
 
 
@@ -420,7 +453,7 @@ plot_factors(x_test, factors, "image/factor_outsample.png")
 # - マクロファクターっぽい解釈は難しそう
 # - 比較対象は株のスタイルファクターの方が良さげ？
 # ---------------------------------------------------------
-factors = model_factor.predict(x_train)
+weight, factors = model_factor.predict([x_train_chars, x_train_lag, x_train])
 factors = factors.T
 
 # 平均0%・標準偏差年率10%にスケーリング（年間260日基準）
@@ -432,6 +465,7 @@ for i in range(NUM_FACTOR):
 factor_data = pd.DataFrame(factors).T
 factor_data.index = x_train.index
 factor_data.columns = ["factor_{}".format(i+1) for i in range(NUM_FACTOR)]
+
 
 # 経済データを取得
 factor_data["日経225"] = pdr.DataReader(
@@ -479,7 +513,8 @@ plt.close()
 decoded_return = pca.inverse_transform(pca.transform(x_train))
 decoded_return = x_scaler.inverse_transform(decoded_return)
 
-for num_index in range(NUM_PLOT):
+# for num_index in range(NUM_PLOT):
+for num_index in range(decoded_return.shape[1]):
     # 累積リターンに変更
     cum_ret = 100 * (1 + x_train_org.iloc[:, num_index]).cumprod()
     cum_ret_decoded = 100 * (1 + decoded_return[:, num_index]).cumprod()

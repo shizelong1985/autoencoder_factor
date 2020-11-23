@@ -32,9 +32,9 @@ FILE_PATH = "data/index_data.csv"
 STATS_PATHS = {
     "LIQ": "data/volume_data.csv",
 }
-NUM_FACTOR = 3
-NUM_BETA_LAG = 1
-NUM_EPOCH = 100
+NUM_FACTOR = 7
+NUM_BETA_LAG = 20
+NUM_EPOCH = 500
 NUM_BATCH = 100
 LR = 0.01
 TRAIN_START = '2011/1/1'
@@ -93,6 +93,24 @@ def plot_factors(x_data, factors, save_path):
     plt.close()
 
     return factors
+
+
+def plot_scatter_chart(x_true, x_pred, title):
+    plt.scatter(np.array(x_true).flatten(),
+                np.array(x_pred).flatten(),
+                s=1)
+    plt.plot(np.linspace(-0.2, 0.2, 1000),
+             np.linspace(-0.2, 0.2, 1000),
+             color="black")
+    plt.title("R2:{}".format(round(calcu_r_squared(x_true, x_pred)*100, 2)),
+              fontname="MS Gothic")
+    plt.xlabel("実リターン", fontname="MS Gothic")
+    plt.ylabel("推定リターン", fontname="MS Gothic")
+    plt.xlim(-0.2, 0.2)
+    plt.ylim(-0.2, 0.2)
+    plt.grid(True)
+    plt.savefig("image/return_scatter_{}".format(title))
+    plt.show()
 
 
 def round_data(x_data, quantile_point=0.01):
@@ -161,59 +179,21 @@ for i in range(asset_index.index.shape[0]-1):
 asset_index = asset_index.drop(asset_index.index[dup_list])
 asset_return = asset_index.pct_change().dropna()
 
-if IS_STATS:
-    # 経済データを使用する場合
-    # モメンタム
-    asset_chars = asset_index.diff(5)
+# 過去NUM_BETA_LAG日前～前日のデータを使用
+asset_chars = asset_return.shift(1)
+for i in range(NUM_BETA_LAG-1):
     asset_chars = pd.concat(
-        [asset_chars, asset_index.diff(20)], axis=1).dropna()
-    # ボラティリティ
-    asset_chars = pd.concat(
-        [asset_chars, asset_return.rolling(5).std(ddof=0)], axis=1).dropna()
-    asset_chars = pd.concat(
-        [asset_chars, asset_return.rolling(20).std(ddof=0)], axis=1).dropna()
-    # 流動性
-    volume = pd.read_csv(STATS_PATHS["LIQ"], encoding="shift_jis", index_col=0)
-    volume = volume.dropna(how="all").dropna(axis=1).dropna()
-    volume_sd = volume.rolling(20).std(ddof=0)
-    asset_chars = pd.concat([asset_chars, volume], axis=1).dropna()
-    asset_chars = pd.concat([asset_chars, volume_sd], axis=1).dropna()
-    # 差分追加版
-    # asset_chars = pd.concat([asset_chars, asset_chars.diff(5)],
-    #                         axis=1).shift(1).dropna()
-    # asset charsは一日ラグを設ける
-    asset_chars = asset_chars.shift(1).dropna()
+        [asset_chars, asset_return.shift(i+2)], axis=1)
+asset_chars = asset_chars.dropna()
 
-    if not IS_RECURRENT:
-        # 過去NUM_BETA_LAG日前～前日のデータを使用
-        base_chars = asset_chars
-        for i in range(NUM_BETA_LAG-1):
-            base_chars = pd.concat(
-                [base_chars, asset_chars.shift(i+1)], axis=1)
-        asset_chars = base_chars
-        asset_chars = asset_chars.dropna()
-else:
-    # 経済データは使用せず、過去NUM_BETA_LAG日前～前日のデータを使用
-    asset_chars = []
-    for i in range(asset_return.shape[0] - NUM_BETA_LAG):
-        asset_char = []
-        for j in range(NUM_BETA_LAG):
-            asset_char.append(np.array(asset_return.iloc[i+j, :]))
-        asset_chars.append(asset_char)
-    asset_chars = np.array(asset_chars)
-
-# インデックスの型を変更し、ラグ部分のデータを削除
+# 共通部分のみ使用する
 asset_return.index = np.array([datetime.strptime(x, '%Y/%m/%d')
                                for x in asset_return.index])
-
-# 特徴データを使用する場合に使用
-if IS_STATS:
-    asset_chars.index = np.array([datetime.strptime(x, '%Y/%m/%d')
-                                  for x in asset_chars.index])
-    common_index = np.intersect1d(asset_return.index, asset_chars.index)
-    # 共通部分のみ使用する
-    asset_return = asset_return.loc[common_index]
-    asset_chars = asset_chars.loc[common_index]
+asset_chars.index = np.array([datetime.strptime(x, '%Y/%m/%d')
+                              for x in asset_chars.index])
+common_index = np.intersect1d(asset_return.index, asset_chars.index)
+asset_return = asset_return.loc[common_index]
+asset_chars = asset_chars.loc[common_index]
 
 # サンプル分割を実施
 is_train = (asset_return.index >= TRAIN_START) * \
@@ -230,7 +210,7 @@ x_test_chars = asset_chars[is_test]
 # x_train_chars = round_data(x_train_chars, quantile_point=0.005)  # 何故かこっちだけ機能しない
 print(np.max(x_train_org.max()))
 
-# 標準化：今は資産の特徴データにのみ適用
+# 学習時は標準化
 x_scaler = StandardScaler()
 x_scaler.fit(x_train_org)
 x_train = pd.DataFrame(x_scaler.transform(x_train_org),
@@ -259,15 +239,12 @@ if IS_RECURRENT:
         None, x_train_chars.shape[1], x_train_chars.shape[2]), recurrent_dropout=0.25))(input_beta)
     x = BatchNormalization()(x)
     x = LeakyReLU(alpha=0.2)(x)
-    # x = ReLU()(x)
     x = Dropout(0.20)(x)
 else:
     input_beta = Input(shape=(x_train_chars.shape[1],))
-    # x = Flatten()(input_beta)
     x = Dense(256, kernel_regularizer=regularizers.l1(1e-3))(input_beta)
     x = BatchNormalization()(x)
     x = LeakyReLU(alpha=0.3)(x)
-    # x = ReLU()(x)
     x = Dropout(0.20)(x)
 x = Dense(128, kernel_regularizer=regularizers.l1(1e-3))(x)
 x = BatchNormalization()(x)
@@ -292,7 +269,7 @@ output = dot([output_beta, output_factor], axes=(2, 1))
 # adam = Adam(lr=0.001)
 nadam = Nadam()
 autoencoder = Model(inputs=[input_beta, input_factor], output=output)
-autoencoder.compile(optimizer="adam", loss='mean_squared_error')
+autoencoder.compile(optimizer=nadam, loss='mean_squared_error')
 autoencoder.summary()
 plot_model(autoencoder, to_file="image/model_image.png",
            show_shapes=True, show_layer_names=False)  # モデルの構造を出力
@@ -385,6 +362,10 @@ for i_firm in range(NUM_PLOT):
             "image/beta_insample_{}_factor_{}".format(firm_name, i_factor+1))
         plt.close()
 
+# 散布図（全リターン）
+plot_scatter_chart(x_train_org, decoded_return, "insample")
+
+
 # ---------------------------------------------------------
 # アウトオブサンプルの系列比較
 # ---------------------------------------------------------
@@ -414,6 +395,9 @@ print(calcu_r_squared(x_test_org, decoded_return))
 factors = model_factor.predict(x_test)
 plot_factors(x_test, factors, "image/factor_outsample.png")
 
+# 散布図（全リターン）
+plot_scatter_chart(x_test_org, decoded_return, "outsample")
+
 
 # ---------------------------------------------------------
 # ファクター解釈用に経済データを追加
@@ -438,9 +422,18 @@ factor_data["日経225"] = pdr.DataReader(
     '^N225', 'yahoo', TRAIN_START, TRAIN_END)['Close'].pct_change()
 factor_data["ドル円"] = pdr.DataReader(
     'JPY=X', 'yahoo', TRAIN_START, TRAIN_END)['Close'].pct_change()
-# 日経225の特徴データ
-nikkei = pdr.DataReader('^N225', 'yahoo', TRAIN_START, TRAIN_END)['Close']
 
+# MOMとVOL
+asset_mom = pd.read_csv("stats/mom_factor_ret.csv", encoding="shift_jis", index_col=0).dropna()
+asset_vol = pd.read_csv("stats/vol_factor_ret.csv", encoding="shift_jis", index_col=0).dropna()
+asset_mom.index = np.array([datetime.strptime(x, '%Y/%m/%d')
+                               for x in asset_mom.index])
+asset_vol.index = np.array([datetime.strptime(x, '%Y/%m/%d')
+                               for x in asset_vol.index])
+# 共通部分のみ使用する
+factor_data["MOM"] = asset_mom
+factor_data["VOL"] = asset_vol
+factor_data = factor_data.dropna()
 
 # ---------------------------------------------------------
 # PCAを用いた分解
@@ -472,6 +465,7 @@ plt.legend(loc='upper right')
 plt.savefig("image/pca_factor_insample.png")
 plt.close()
 
+
 # ---------------------------------------------------------
 # PCA:インサンプルの比較
 # ---------------------------------------------------------
@@ -494,6 +488,7 @@ for num_index in range(NUM_PLOT):
     plt.savefig("image/PCA_insample_{}.png".format(num_index))
 
 print(calcu_r_squared(x_train_org, decoded_return))
+plot_scatter_chart(x_train_org, decoded_return, "PCAinsample")
 
 # ---------------------------------------------------------
 # PCA:アウトサンプルの比較
@@ -517,6 +512,7 @@ for num_index in range(NUM_PLOT):
     plt.savefig("image/PCA_res_outsample_{}.png".format(num_index))
     plt.close()
 print(calcu_r_squared(x_test_org, decoded_return))
+plot_scatter_chart(x_test_org, decoded_return, "PCAoutsample")
 
 # ファクター分析用に系列を生成
 pca_factors = pca.transform(x_train)
